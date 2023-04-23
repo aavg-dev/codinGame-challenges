@@ -10,6 +10,7 @@
 #include <map>
 #include <math.h>
 #include <chrono>
+#include <set>
 
 using namespace std;
 
@@ -64,19 +65,31 @@ public:
         mPos.x = x;
         mPos.y = y;
     }
+    Human(const Human& h){
+        mId = h.mId;
+        mPos = h.mPos;
+    }
     int mId = 0;
     Position mPos = {};
 
 };
+string to_string(const Human& h){
+    return ("Id: " + to_string(h.mId) + " Pos:" + to_string(h.mPos.x) + "," + (to_string(h.mPos.y)));
+}
 
 class Zombie {
 public:
-    Zombie(int x, int y, int id,int nextX, int nextY){
+    Zombie(int id,int x, int y, int nextX, int nextY){
         mId = id;
         mPos.x = x;
         mPos.y = y;
         mNextPos.x = nextX;
         mNextPos.y = nextY;
+    }
+    Zombie(const Zombie& z){
+        mId = z.mId;
+        mPos = z.mPos;
+        mNextPos = z.mNextPos;
     }
     int mId = 0;
     Position mPos = {};
@@ -86,24 +99,26 @@ public:
 
 };
 
+string to_string(const Zombie& z){
+    return ("Id: " + to_string(z.mId) + " Pos:" + to_string(z.mPos.x) + "," + (to_string(z.mPos.y)));
+}
+
 class Threat {
 public:
-    Threat( int distance,Zombie z, Human h){
-        mDistance = distance;
-        mZombie=z;
-        mHuman = h;
-    }
+    Threat( int distance,Zombie z, Human h): mDistance(distance), mZombie(z), mHuman(h){ }
+    friend bool operator<(const Threat& lhs, const Threat& rhs) {return lhs.mDistance<rhs.mDistance;}
+
     int mDistance;
     Zombie mZombie;
     Human mHuman;
 
-}
+};
 
 /***************     GLOBALS     ***************/
 
-Player g_Player (0,0); 
-vector<Human> g_HumanList;
-vector<Zombie> g_ZombieList;
+static Player g_Player (0,0); 
+static vector<Human> g_HumanList;
+static vector<Zombie> g_ZombieList;
 
 
 //Refresh them after every loop
@@ -114,45 +129,42 @@ void clearGlobals(){
 
 /*********************************************/
 
+std::shared_ptr<Zombie> getCloserZombieToPos(Position pos);
+std::multiset<Threat> getOrderedThreatsList();
+std::shared_ptr<Human> getCloserHumanToMe();
 
 
 //A list of threats which is defined by a zombie, a human and the distance between them
-std::list<Threat> getOrderedThreatsList(){
+std::multiset<Threat> getOrderedThreatsList(){
 
     int closest_zombie_distance = INT_MAX;
-    //std::shared_ptr<Zombie> threatening = nullptr;
-    //std::shared_ptr<Human> threatened = nullptr;
-
-
+    std::multiset<Threat> ret;
     for (auto human : g_HumanList){
-        for (auto z : g_ZombieList){
-            int new_distance = z.mNextPos.distanceTo(human.mPos);
-            cerr << "zombie " << z.mId << " is at " << new_distance << " distance units from human " << human.mId << endl;
-            if(new_distance < closest_zombie_distance){
-                closest_zombie_distance = new_distance;
-                threatening = std::make_shared<Zombie>(z);
-                threatened = std::make_shared<Human>(human);
-            }
-        }
+        std::shared_ptr<Zombie> z = getCloserZombieToPos(human.mPos);
+        if(z != nullptr){
+            ret.insert(Threat( z->mNextPos.distanceTo(human.mPos),*z, human));
+        }          
     }
-    return std::make_pair(threatening, threatened);
+    return ret;
 }
 
 
-
-
-std::shared_ptr<Zombie> getCloserZombieToMe(){
+std::shared_ptr<Zombie> getCloserZombieToPos(Position pos){
 
     int distance = INT_MAX;
     std::shared_ptr<Zombie> ret = nullptr;
     for (auto zombie : g_ZombieList){
-        int new_distance = zombie.mNextPos.distanceTo(g_Player.mPos);
+        int new_distance = zombie.mNextPos.distanceTo(pos);
         if(new_distance < distance){
             distance = new_distance;
             ret = std::make_shared<Zombie>(zombie);
         }
     }
     return ret;
+}
+
+std::shared_ptr<Zombie> getCloserZombieToMe(){
+    return getCloserZombieToPos(g_Player.mPos);
 }
 
 std::shared_ptr<Human> getCloserHumanToMe(){
@@ -169,16 +181,43 @@ std::shared_ptr<Human> getCloserHumanToMe(){
     return ret;
 }
 
-bool canReachDestinationInTime(Position human_pos, Zombie attacker, Player player){
+//Calculate how much turns:
+//1. the zombie needs to get to the human
+//2. the player needs to get to the zombie next pos !!
+bool canReachDestinationInTime(Position human_pos, Zombie zombie, Position player_pos){
+    cerr << "human_pos " << to_string(human_pos) << ", zombie_pos " << to_string(zombie.mPos) << ", player_pos " << to_string(player_pos) << endl;
 
-    int turns_to_kill = attacker.mPos.distanceTo(human_pos) / 800; 
-    int turns_to_save = player.mPos.distanceTo(human_pos) / 2000;
-    if(turns_to_kill >  turns_to_save){
+    //TODO: Should it be float ? Do we need that precise comparison?
+    int turns_to_kill = zombie.mPos.distanceTo(human_pos) / 800; 
+    int turns_to_save = player_pos.distanceTo(zombie.mNextPos) / 2000;
+    cerr << "Turns needed to kill human :"<< turns_to_kill << endl;
+    cerr << "Turns needed to save human :"<< turns_to_save << endl;
+
+    if(turns_to_kill+1 >=  turns_to_save){ //+1 as the zombie kills at the end of the turn, we kill before
         return true;
     }
     return false;
 }
 
+std::shared_ptr<Position> getReachableThreadDestination(){
+
+    std::multiset threats = getOrderedThreatsList();
+    if(threats.size() != 0){
+        for ( auto threats_it = threats.begin(); threats_it != threats.end(); threats_it++ ){
+            cerr << "dangerous_zombie at "<< to_string(threats_it->mZombie.mPos) << endl;
+
+            if (canReachDestinationInTime(threats_it->mHuman.mPos, threats_it->mZombie,g_Player.mPos)){
+                cerr << "Can reach zombie [" << to_string(threats_it->mZombie) << "] in time, let's go "<< endl;
+                return make_shared<Position>(threats_it->mZombie.mNextPos);
+                //cout << to_string(dangerous_zombie->mNextPos) << endl;
+            } else {
+                cerr << "Discarding zombie " << to_string(threats_it->mZombie) << ", we would never save the human"<< endl;
+
+            }
+        }
+    }
+    return nullptr;
+}
 
 
 int main()
@@ -188,9 +227,9 @@ int main()
     while (1) {
         int x;
         int y;
-        g_Player = Player(x,y);
-        clearGlobals();
         cin >> x >> y; cin.ignore();
+        clearGlobals();
+        g_Player.mPos = Position(x,y);
         int human_count;
         cin >> human_count; cin.ignore();
         for (int i = 0; i < human_count; i++) {
@@ -219,27 +258,15 @@ int main()
 
         // Write an action using cout. DON'T FORGET THE "<< endl"
         // To debug: cerr << "Debug messages..." << endl;
-        //std::shared_ptr<Human> in_danger_human = getMostThreateningZombie();
-        std::pair<shared_ptr<Zombie>, shared_ptr<Human>> threat_pair = getOrderedThreatsList();
-        std::shared_ptr<Zombie> dangerous_zombie = std::get<0>(threat_pair);
-        std::shared_ptr<Human> threatened_human = std::get<1>(threat_pair);
+       
+        //TODO: Create a threshold to kill nearby enemies if needed
 
-
-        if(dangerous_zombie != nullptr){
-            cerr << "dangerous_zombie at "<< to_string(dangerous_zombie->mPos) << endl;
-            if(g_Player.mPos == dangerous_zombie->mPos){
-                std::shared_ptr<Zombie> z = getCloserZombieToMe();
-                if(z != nullptr){
-                    cout << to_string(z->mNextPos) << endl;
-                }
-            } else {
-                cout << to_string(dangerous_zombie->mNextPos) << endl;
-            }
-
+        std::shared_ptr<Position> next_destination = getReachableThreadDestination();
+        if(next_destination != nullptr){
+            cout << to_string(next_destination) << endl;
         } else {
-            cerr << "Cannot find a threatened human "<<  endl;
-
-            std::shared_ptr<Zombie> z = getCloserZombieToMe();
+            cerr << "Could not find a human to save "<<  endl;
+            std::shared_ptr<Zombie> z = getCloserZombieToMe();;
             if(z != nullptr){
                 cout << to_string(z->mNextPos) << endl;
             } else {
